@@ -301,13 +301,14 @@ with tab_cost:
         st.warning("Resolve the issues in Network Setup to see results.")
     else:
         current_assignment = {
-            mid: m.current_path for mid, m in model.markets.items() if model.route_is_active(m.current_path)
+            mid: m.current_path for mid, m in model.markets.items() if model.lanes_exist(m.current_path)
         }
         missing = set(model.markets) - set(current_assignment)
         if missing:
             st.warning(
-                f"These markets' current_path is not usable with the active hub set and were "
-                f"excluded from the 'as-routed' report (they still appear in Optimized): {sorted(missing)}"
+                f"These markets' current_path references a lane that doesn't exist in the "
+                f"Lanes table and were excluded from the 'as-routed' report: {sorted(missing)}. "
+                f"(A hub being toggled inactive does NOT exclude a market here -- only a missing lane does.)"
             )
 
         st.subheader("Current state — as routed today")
