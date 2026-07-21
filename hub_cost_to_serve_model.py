@@ -153,17 +153,29 @@ class HubNetworkModel:
             return path[-2]
         return None
 
-    def route_is_active(self, path: List[str]) -> bool:
-        """A route is usable only if every intermediate hub is active and
-        every lane along it exists."""
-        for node in path[1:-1]:
-            hub = self.hubs.get(node)
-            if hub is not None and not hub.active:
-                return False
+    def lanes_exist(self, path: List[str]) -> bool:
+        """True if every consecutive lane on this path is actually defined
+        in the network -- independent of whether any hub on it is currently
+        flagged active/inactive. A market's *current, as-routed-today* path
+        is a fact about what's happening in the real world; whether a hub is
+        toggled active only governs which routes are available to move
+        markets ONTO during optimization/what-if analysis, not whether a
+        path already in use can be costed."""
         for a, b in zip(path, path[1:]):
             if (a, b) not in self.lanes:
                 return False
         return True
+
+    def route_is_active(self, path: List[str]) -> bool:
+        """A route is usable for (re)routing/optimization only if every
+        intermediate hub is active AND every lane along it exists. Use
+        `lanes_exist` instead when costing a market's already-in-use current
+        path, so a hub being toggled off doesn't erase historical routing."""
+        for node in path[1:-1]:
+            hub = self.hubs.get(node)
+            if hub is not None and not hub.active:
+                return False
+        return self.lanes_exist(path)
 
     # ---- route enumeration -------------------------------------------------
 
