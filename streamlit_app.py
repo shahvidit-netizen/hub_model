@@ -1,442 +1,398 @@
 """
-streamlit_app.py
+hub_cost_to_serve_app.py
 
-Interactive Streamlit front-end for hub_cost_to_serve_model.py.
+Streamlit app: compare BASELINE (direct FC -> market) vs OPTIMIZED
+(best route per market: direct vs. through an active hub) cost-to-serve.
 
-Run with:
-    pip install streamlit pandas
-    streamlit run streamlit_app.py
-
-Every network parameter is editable in the UI:
-  - Hubs (sort cost, active/inactive)
-  - Lanes (distance, rate, trailer capacity, min trailers)
-  - Markets (volume, delivery class, current path, last-mile multipliers)
-  - Last-mile base rate table (by delivery class)
-  - Per-hub last-mile multiplier overrides (hub proximity effect)
-
-Three tabs:
-  1. Network Setup   - edit every input table
-  2. Cost to Serve   - current-state vs. optimized-routing reports, cost
-                        burden ranking, charts
-  3. Hub Toggle      - flip one hub on/off, see the market-level and
-                        system-level cost delta
+Run:  streamlit run hub_cost_to_serve_app.py
 """
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
-from hub_cost_to_serve_model import Hub, Lane, Market, HubNetworkModel
+
+# --------------------------------------------------------------------------
+# Core primitives
+# --------------------------------------------------------------------------
+
+@dataclass
+class Lane:
+    from_node: str
+    to_node: str
+    distance_miles: float
+    rate_per_mile: float
+    trailer_capacity: int = 200
+    min_trailers: int = 1
+
+    def trailers_needed(self, volume: int) -> int:
+        if volume <= 0:
+            return 0
+        return max(self.min_trailers, math.ceil(volume / self.trailer_capacity))
+
+    def linehaul_total_cost(self, volume: int) -> float:
+        return self.trailers_needed(volume) * self.distance_miles * self.rate_per_mile
+
+    def linehaul_cpp(self, volume: int) -> float:
+        if volume <= 0:
+            return 0.0
+        return self.linehaul_total_cost(volume) / volume
+
+    def utilization(self, volume: int) -> float:
+        trailers = self.trailers_needed(volume)
+        return 0.0 if trailers == 0 else volume / (trailers * self.trailer_capacity)
+
+
+@dataclass
+class Hub:
+    node_id: str
+    name: str
+    sort_cost_per_parcel: float
+    active: bool = True
+
+
+@dataclass
+class Market:
+    market_id: str
+    name: str
+    origin_node: str
+    volume: int
+    delivery_class: str
+    last_mile_multiplier: float = 1.0
+    last_mile_multiplier_by_hub: Dict[str, float] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------
-# Demo defaults (same network as the standalone script) — used to seed
-# session_state the first time the app loads, and via "Reset to demo data".
+# Network model
 # --------------------------------------------------------------------------
 
-def demo_tables():
-    hubs_df = pd.DataFrame([
-        {"node_id": "HUB_MEM", "name": "Memphis Regional Hub", "sort_cost_per_parcel": 0.35, "active": False},
-        {"node_id": "HUB_DAL", "name": "Dallas Candidate Hub", "sort_cost_per_parcel": 0.32, "active": False},
-    ])
+class HubNetworkModel:
+    def __init__(self, last_mile_rate_table: Dict[str, float]):
+        self.lanes: Dict[Tuple[str, str], Lane] = {}
+        self.hubs: Dict[str, Hub] = {}
+        self.markets: Dict[str, Market] = {}
+        self.last_mile_rate_table = last_mile_rate_table
+        self._adj: Dict[str, List[str]] = {}
 
-    lanes_df = pd.DataFrame([
-        {"from_node": "FC_ATL", "to_node": "HUB_MEM", "distance_miles": 390, "rate_per_mile": 2.60, "trailer_capacity": 220, "min_trailers": 1},
-        {"from_node": "FC_ATL", "to_node": "HUB_DAL", "distance_miles": 450, "rate_per_mile": 2.60, "trailer_capacity": 220, "min_trailers": 1},
-        {"from_node": "HUB_MEM", "to_node": "HUB_DAL", "distance_miles": 430, "rate_per_mile": 2.55, "trailer_capacity": 220, "min_trailers": 1},
-        {"from_node": "FC_ATL", "to_node": "MKT_SHV", "distance_miles": 355, "rate_per_mile": 2.60, "trailer_capacity": 220, "min_trailers": 1},
-        {"from_node": "FC_ATL", "to_node": "MKT_TUL", "distance_miles": 470, "rate_per_mile": 2.60, "trailer_capacity": 220, "min_trailers": 1},
-        {"from_node": "FC_ATL", "to_node": "MKT_OKC", "distance_miles": 590, "rate_per_mile": 2.60, "trailer_capacity": 220, "min_trailers": 1},
-        {"from_node": "FC_ATL", "to_node": "MKT_LIT", "distance_miles": 340, "rate_per_mile": 2.60, "trailer_capacity": 220, "min_trailers": 1},
-        {"from_node": "FC_ATL", "to_node": "MKT_FTW", "distance_miles": 730, "rate_per_mile": 2.60, "trailer_capacity": 220, "min_trailers": 1},
-        {"from_node": "FC_ATL", "to_node": "MKT_ABI", "distance_miles": 850, "rate_per_mile": 2.60, "trailer_capacity": 220, "min_trailers": 1},
-        {"from_node": "HUB_MEM", "to_node": "MKT_SHV", "distance_miles": 300, "rate_per_mile": 2.20, "trailer_capacity": 180, "min_trailers": 1},
-        {"from_node": "HUB_MEM", "to_node": "MKT_TUL", "distance_miles": 360, "rate_per_mile": 2.20, "trailer_capacity": 180, "min_trailers": 1},
-        {"from_node": "HUB_MEM", "to_node": "MKT_LIT", "distance_miles": 140, "rate_per_mile": 2.20, "trailer_capacity": 180, "min_trailers": 1},
-        {"from_node": "HUB_MEM", "to_node": "MKT_OKC", "distance_miles": 470, "rate_per_mile": 2.20, "trailer_capacity": 180, "min_trailers": 1},
-        {"from_node": "HUB_DAL", "to_node": "MKT_SHV", "distance_miles": 190, "rate_per_mile": 2.20, "trailer_capacity": 180, "min_trailers": 1},
-        {"from_node": "HUB_DAL", "to_node": "MKT_TUL", "distance_miles": 260, "rate_per_mile": 2.20, "trailer_capacity": 180, "min_trailers": 1},
-        {"from_node": "HUB_DAL", "to_node": "MKT_OKC", "distance_miles": 205, "rate_per_mile": 2.20, "trailer_capacity": 180, "min_trailers": 1},
-        {"from_node": "HUB_DAL", "to_node": "MKT_FTW", "distance_miles": 35, "rate_per_mile": 2.20, "trailer_capacity": 180, "min_trailers": 1},
-        {"from_node": "HUB_DAL", "to_node": "MKT_ABI", "distance_miles": 155, "rate_per_mile": 2.20, "trailer_capacity": 180, "min_trailers": 1},
-        {"from_node": "HUB_DAL", "to_node": "MKT_LIT", "distance_miles": 330, "rate_per_mile": 2.20, "trailer_capacity": 180, "min_trailers": 1},
-    ])
+    # ---- construction ----
+    def add_lane(self, lane: Lane) -> None:
+        self.lanes[(lane.from_node, lane.to_node)] = lane
+        self._adj.setdefault(lane.from_node, []).append(lane.to_node)
 
-    markets_df = pd.DataFrame([
-        {"market_id": "MKT_SHV", "name": "Shreveport Cluster", "origin_node": "FC_ATL", "volume": 1400, "delivery_class": "OOR", "current_path": "FC_ATL,MKT_SHV", "last_mile_multiplier": 1.05},
-        {"market_id": "MKT_TUL", "name": "Tulsa Cluster", "origin_node": "FC_ATL", "volume": 1150, "delivery_class": "OOR", "current_path": "FC_ATL,MKT_TUL", "last_mile_multiplier": 1.10},
-        {"market_id": "MKT_OKC", "name": "Oklahoma City Cluster", "origin_node": "FC_ATL", "volume": 2200, "delivery_class": "IR", "current_path": "FC_ATL,MKT_OKC", "last_mile_multiplier": 1.00},
-        {"market_id": "MKT_LIT", "name": "Little Rock Cluster", "origin_node": "FC_ATL", "volume": 1900, "delivery_class": "IR", "current_path": "FC_ATL,MKT_LIT", "last_mile_multiplier": 0.95},
-        {"market_id": "MKT_FTW", "name": "Fort Worth Cluster", "origin_node": "FC_ATL", "volume": 2600, "delivery_class": "IR", "current_path": "FC_ATL,MKT_FTW", "last_mile_multiplier": 1.00},
-        {"market_id": "MKT_ABI", "name": "Abilene Cluster", "origin_node": "FC_ATL", "volume": 800, "delivery_class": "OOR", "current_path": "FC_ATL,MKT_ABI", "last_mile_multiplier": 1.15},
-    ])
+    def add_hub(self, hub: Hub) -> None:
+        self.hubs[hub.node_id] = hub
 
-    last_mile_df = pd.DataFrame([
-        {"delivery_class": "IR", "base_rate": 2.10},
-        {"delivery_class": "OOR", "base_rate": 3.85},
-    ])
+    def add_market(self, market: Market) -> None:
+        self.markets[market.market_id] = market
 
-    multiplier_df = pd.DataFrame([
-        {"market_id": "MKT_SHV", "hub_id": "HUB_DAL", "multiplier": 0.90},
-        {"market_id": "MKT_SHV", "hub_id": "HUB_MEM", "multiplier": 0.98},
-        {"market_id": "MKT_TUL", "hub_id": "HUB_DAL", "multiplier": 0.95},
-        {"market_id": "MKT_TUL", "hub_id": "HUB_MEM", "multiplier": 1.02},
-        {"market_id": "MKT_OKC", "hub_id": "HUB_DAL", "multiplier": 0.92},
-        {"market_id": "MKT_OKC", "hub_id": "HUB_MEM", "multiplier": 1.00},
-        {"market_id": "MKT_LIT", "hub_id": "HUB_MEM", "multiplier": 0.90},
-        {"market_id": "MKT_LIT", "hub_id": "HUB_DAL", "multiplier": 1.05},
-        {"market_id": "MKT_FTW", "hub_id": "HUB_DAL", "multiplier": 0.80},
-        {"market_id": "MKT_FTW", "hub_id": "HUB_MEM", "multiplier": 1.05},
-        {"market_id": "MKT_ABI", "hub_id": "HUB_DAL", "multiplier": 0.88},
-        {"market_id": "MKT_ABI", "hub_id": "HUB_MEM", "multiplier": 1.10},
-    ])
+    # ---- leg costing ----
+    def last_mile_cpp(self, market: Market, serving_hub: Optional[str]) -> float:
+        base = self.last_mile_rate_table[market.delivery_class]
+        if serving_hub is not None and serving_hub in market.last_mile_multiplier_by_hub:
+            mult = market.last_mile_multiplier_by_hub[serving_hub]
+        else:
+            mult = market.last_mile_multiplier
+        return base * mult
 
-    return hubs_df, lanes_df, markets_df, last_mile_df, multiplier_df
+    def _serving_hub(self, path: List[str]) -> Optional[str]:
+        if len(path) >= 2 and path[-2] in self.hubs:
+            return path[-2]
+        return None
 
+    def route_is_active(self, path: List[str]) -> bool:
+        for node in path[1:-1]:
+            hub = self.hubs.get(node)
+            if hub is not None and not hub.active:
+                return False
+        for a, b in zip(path, path[1:]):
+            if (a, b) not in self.lanes:
+                return False
+        return True
 
-def init_state():
-    if "hubs_df" not in st.session_state:
-        hubs_df, lanes_df, markets_df, last_mile_df, multiplier_df = demo_tables()
-        st.session_state.hubs_df = hubs_df
-        st.session_state.lanes_df = lanes_df
-        st.session_state.markets_df = markets_df
-        st.session_state.last_mile_df = last_mile_df
-        st.session_state.multiplier_df = multiplier_df
+    def enumerate_routes(self, origin: str, dest: str, max_hops: int = 3) -> List[List[str]]:
+        routes: List[List[str]] = []
 
+        def dfs(node: str, path: List[str]):
+            if len(path) - 1 > max_hops + 1:
+                return
+            if node == dest and len(path) > 1:
+                routes.append(list(path))
+                return
+            for nxt in self._adj.get(node, []):
+                if nxt in path:
+                    continue
+                hub = self.hubs.get(nxt)
+                if hub is not None and not hub.active and nxt != dest:
+                    continue
+                path.append(nxt)
+                dfs(nxt, path)
+                path.pop()
 
-def reset_to_demo():
-    hubs_df, lanes_df, markets_df, last_mile_df, multiplier_df = demo_tables()
-    st.session_state.hubs_df = hubs_df
-    st.session_state.lanes_df = lanes_df
-    st.session_state.markets_df = markets_df
-    st.session_state.last_mile_df = last_mile_df
-    st.session_state.multiplier_df = multiplier_df
+        dfs(origin, [origin])
+        return routes
+
+    def route_cost_breakdown(
+        self, market: Market, path: List[str], lane_volumes: Dict[Tuple[str, str], int]
+    ) -> Dict[str, float]:
+        linehaul_cpp = 0.0
+        for a, b in zip(path, path[1:]):
+            lane = self.lanes[(a, b)]
+            vol = lane_volumes.get((a, b), market.volume)
+            linehaul_cpp += lane.linehaul_cpp(vol)
+
+        sort_cpp = sum(
+            self.hubs[node].sort_cost_per_parcel
+            for node in path[1:-1] if node in self.hubs
+        )
+        last_mile = self.last_mile_cpp(market, self._serving_hub(path))
+        total = linehaul_cpp + sort_cpp + last_mile
+        return {
+            "linehaul_cpp": round(linehaul_cpp, 4),
+            "sort_cpp": round(sort_cpp, 4),
+            "last_mile_cpp": round(last_mile, 4),
+            "total_cpp": round(total, 4),
+        }
+
+    def _lane_volumes(self, assignment: Dict[str, List[str]]) -> Dict[Tuple[str, str], int]:
+        volumes: Dict[Tuple[str, str], int] = {}
+        for mid, path in assignment.items():
+            vol = self.markets[mid].volume
+            for a, b in zip(path, path[1:]):
+                volumes[(a, b)] = volumes.get((a, b), 0) + vol
+        return volumes
+
+    # ---- BASELINE: every market ships DIRECT FC -> market ----
+    def baseline_assignment(self) -> Dict[str, List[str]]:
+        assignment = {}
+        for mid, m in self.markets.items():
+            direct = [m.origin_node, m.market_id]
+            if (m.origin_node, m.market_id) in self.lanes:
+                assignment[mid] = direct
+            else:
+                # fall back to any feasible route if no direct lane exists
+                cands = [p for p in self.enumerate_routes(m.origin_node, m.market_id)
+                         if self.route_is_active(p)]
+                assignment[mid] = cands[0] if cands else direct
+        return assignment
+
+    # ---- OPTIMIZED: iterative best-response route selection ----
+    def optimize_assignment(self, max_hops: int = 3, iterations: int = 8) -> Dict[str, List[str]]:
+        # seed with baseline (direct) routing
+        assignment = self.baseline_assignment()
+        route_cache: Dict[str, List[List[str]]] = {}
+
+        for _ in range(iterations):
+            lane_volumes = self._lane_volumes(assignment)
+            new_assignment: Dict[str, List[str]] = {}
+            changed = False
+
+            for mid, market in self.markets.items():
+                if mid not in route_cache:
+                    route_cache[mid] = [
+                        p for p in self.enumerate_routes(market.origin_node, market.market_id, max_hops)
+                    ]
+                candidates = [p for p in route_cache[mid] if self.route_is_active(p)]
+                if not candidates:
+                    new_assignment[mid] = assignment.get(mid, [market.origin_node, market.market_id])
+                    continue
+
+                best_path, best_cost = None, math.inf
+                for path in candidates:
+                    breakdown = self.route_cost_breakdown(market, path, lane_volumes)
+                    if breakdown["total_cpp"] < best_cost:
+                        best_cost, best_path = breakdown["total_cpp"], path
+
+                new_assignment[mid] = best_path
+                if best_path != assignment.get(mid):
+                    changed = True
+
+            assignment = new_assignment
+            if not changed:
+                break
+        return assignment
+
+    # ---- reporting ----
+    def report(self, assignment: Dict[str, List[str]]) -> pd.DataFrame:
+        lane_volumes = self._lane_volumes(assignment)
+        rows = []
+        for mid, market in self.markets.items():
+            path = assignment[mid]
+            b = self.route_cost_breakdown(market, path, lane_volumes)
+            uses_hub = any(n in self.hubs for n in path[1:-1])
+            rows.append({
+                "market_id": mid,
+                "market_name": market.name,
+                "delivery_class": market.delivery_class,
+                "volume": market.volume,
+                "route": " -> ".join(path),
+                "via_hub": "Hub" if uses_hub else "Direct",
+                "linehaul_cpp": b["linehaul_cpp"],
+                "sort_cpp": b["sort_cpp"],
+                "last_mile_cpp": b["last_mile_cpp"],
+                "total_cpp": b["total_cpp"],
+                "total_cost": round(b["total_cpp"] * market.volume, 2),
+            })
+        return pd.DataFrame(rows).sort_values("total_cost", ascending=False).reset_index(drop=True)
+
+    def system_totals(self, df: pd.DataFrame) -> Dict[str, float]:
+        vol = df["volume"].sum()
+        cost = df["total_cost"].sum()
+        return {
+            "total_volume": int(vol),
+            "total_cost": round(cost, 2),
+            "network_avg_cpp": round(cost / vol, 4) if vol else 0.0,
+        }
 
 
 # --------------------------------------------------------------------------
-# Build a HubNetworkModel from the current editable tables
+# Demo network builder (parameterized)
 # --------------------------------------------------------------------------
 
-def build_model_from_state() -> HubNetworkModel:
-    last_mile_rate_table = {
-        row["delivery_class"]: float(row["base_rate"])
-        for _, row in st.session_state.last_mile_df.iterrows()
-        if str(row["delivery_class"]).strip()
+def build_network(ir_rate: float, oor_rate: float,
+                  mem_sort: float, dal_sort: float,
+                  mem_active: bool, dal_active: bool,
+                  rate_per_mile: float, stem_rate: float,
+                  trailer_cap: int) -> HubNetworkModel:
+    model = HubNetworkModel(last_mile_rate_table={"IR": ir_rate, "OOR": oor_rate})
+
+    model.add_hub(Hub("HUB_MEM", "Memphis Regional Hub", mem_sort, active=mem_active))
+    model.add_hub(Hub("HUB_DAL", "Dallas Candidate Hub", dal_sort, active=dal_active))
+
+    # origin -> hub lanes
+    model.add_lane(Lane("FC_ATL", "HUB_MEM", 390, rate_per_mile, trailer_cap))
+    model.add_lane(Lane("FC_ATL", "HUB_DAL", 450, rate_per_mile, trailer_cap))
+    model.add_lane(Lane("HUB_MEM", "HUB_DAL", 430, rate_per_mile * 0.98, trailer_cap))
+
+    # direct bypass lanes
+    for m, dist in [("MKT_SHV", 355), ("MKT_TUL", 470), ("MKT_OKC", 590),
+                    ("MKT_LIT", 340), ("MKT_FTW", 730), ("MKT_ABI", 850)]:
+        model.add_lane(Lane("FC_ATL", m, dist, rate_per_mile, trailer_cap))
+
+    # hub -> market stems
+    hub_market_stems = {
+        "HUB_MEM": {"MKT_SHV": 300, "MKT_TUL": 360, "MKT_LIT": 140, "MKT_OKC": 470},
+        "HUB_DAL": {"MKT_SHV": 190, "MKT_TUL": 260, "MKT_OKC": 205, "MKT_FTW": 35,
+                    "MKT_ABI": 155, "MKT_LIT": 330},
     }
-    model = HubNetworkModel(last_mile_rate_table=last_mile_rate_table)
+    for hub, stems in hub_market_stems.items():
+        for m, dist in stems.items():
+            model.add_lane(Lane(hub, m, dist, stem_rate, max(1, int(trailer_cap * 0.82))))
 
-    for _, row in st.session_state.hubs_df.iterrows():
-        if not str(row["node_id"]).strip():
-            continue
-        model.add_hub(Hub(
-            node_id=str(row["node_id"]).strip(),
-            name=str(row["name"]),
-            sort_cost_per_parcel=float(row["sort_cost_per_parcel"]),
-            active=bool(row["active"]),
-        ))
-
-    for _, row in st.session_state.lanes_df.iterrows():
-        if not str(row["from_node"]).strip() or not str(row["to_node"]).strip():
-            continue
-        model.add_lane(Lane(
-            from_node=str(row["from_node"]).strip(),
-            to_node=str(row["to_node"]).strip(),
-            distance_miles=float(row["distance_miles"]),
-            rate_per_mile=float(row["rate_per_mile"]),
-            trailer_capacity=int(row["trailer_capacity"]),
-            min_trailers=int(row["min_trailers"]),
-        ))
-
-    # per-market hub multiplier overrides
-    mult_lookup = {}
-    for _, row in st.session_state.multiplier_df.iterrows():
-        mid, hid = str(row.get("market_id", "")).strip(), str(row.get("hub_id", "")).strip()
-        if not mid or not hid:
-            continue
-        mult_lookup.setdefault(mid, {})[hid] = float(row["multiplier"])
-
-    for _, row in st.session_state.markets_df.iterrows():
-        if not str(row["market_id"]).strip():
-            continue
-        path_str = str(row["current_path"])
-        path = [p.strip() for p in path_str.split(",") if p.strip()]
-        mid = str(row["market_id"]).strip()
-        model.add_market(Market(
-            market_id=mid,
-            name=str(row["name"]),
-            origin_node=str(row["origin_node"]).strip(),
-            volume=int(row["volume"]),
-            delivery_class=str(row["delivery_class"]).strip(),
-            current_path=path,
-            last_mile_multiplier=float(row["last_mile_multiplier"]),
-            last_mile_multiplier_by_hub=mult_lookup.get(mid, {}),
-        ))
+    markets = [
+        ("MKT_SHV", "Shreveport Cluster", 1400, "OOR", 1.05, {"HUB_DAL": 0.90, "HUB_MEM": 0.98}),
+        ("MKT_TUL", "Tulsa Cluster", 1150, "OOR", 1.10, {"HUB_DAL": 0.95, "HUB_MEM": 1.02}),
+        ("MKT_OKC", "Oklahoma City Cluster", 2200, "IR", 1.00, {"HUB_DAL": 0.92, "HUB_MEM": 1.00}),
+        ("MKT_LIT", "Little Rock Cluster", 1900, "IR", 0.95, {"HUB_MEM": 0.90, "HUB_DAL": 1.05}),
+        ("MKT_FTW", "Fort Worth Cluster", 2600, "IR", 1.00, {"HUB_DAL": 0.80, "HUB_MEM": 1.05}),
+        ("MKT_ABI", "Abilene Cluster", 800, "OOR", 1.15, {"HUB_DAL": 0.88, "HUB_MEM": 1.10}),
+    ]
+    for mid, name, vol, cls, mult, by_hub in markets:
+        model.add_market(Market(mid, name, "FC_ATL", vol, cls, mult, by_hub))
 
     return model
 
 
-def validate_model(model: HubNetworkModel) -> list:
-    """Return a list of human-readable problems, if any, so the UI can warn
-    before trying to route (instead of crashing on a bad edit)."""
-    problems = []
-    if not model.last_mile_rate_table:
-        problems.append("No last-mile rate table rows defined.")
-    for mid, market in model.markets.items():
-        if market.delivery_class not in model.last_mile_rate_table:
-            problems.append(f"Market {mid}: delivery_class '{market.delivery_class}' has no matching last-mile rate row.")
-        if len(market.current_path) < 2:
-            problems.append(f"Market {mid}: current_path must have at least 2 nodes (origin,...,market_id).")
-        elif market.current_path[-1] != mid:
-            problems.append(f"Market {mid}: current_path must end with the market_id itself ('{mid}').")
-        elif market.current_path[0] != market.origin_node:
-            problems.append(f"Market {mid}: current_path must start with origin_node ('{market.origin_node}').")
-        routes = model.enumerate_routes(market.origin_node, mid, max_hops=4)
-        if not routes:
-            problems.append(f"Market {mid}: no feasible route exists at all between '{market.origin_node}' and '{mid}' given current lanes.")
-    return problems
-
-
 # --------------------------------------------------------------------------
-# Streamlit page
+# Streamlit UI
 # --------------------------------------------------------------------------
 
 st.set_page_config(page_title="Hub Cost-to-Serve Model", layout="wide")
-init_state()
-
-st.title("Hub Cost-to-Serve Model")
-st.caption(
-    "Total end-to-end CPP (linehaul + sort touch + last-mile) by market, "
-    "and the system-wide cost delta from adding, removing, or repositioning a hub."
-)
+st.title("Hub Cost-to-Serve: Baseline vs. Optimized")
+st.caption("Baseline = every market ships direct FC → market. "
+           "Optimized = best route per market (direct vs. through an active hub) "
+           "with volume-sensitive linehaul.")
 
 with st.sidebar:
-    st.header("Controls")
-    if st.button("Reset all tables to demo data", use_container_width=True):
-        reset_to_demo()
-        st.rerun()
-    st.markdown("---")
-    max_hops = st.slider("Max intermediate hops to simulate per route", 1, 5, 3)
-    iterations = st.slider("Routing solve iterations", 1, 20, 8)
-    st.markdown("---")
-    st.caption(
-        "Edit hubs, lanes, and markets in the **Network Setup** tab. "
-        "Every table supports adding/deleting rows."
+    st.header("Network Parameters")
+
+    st.subheader("Last-mile base rate ($/parcel)")
+    ir_rate = st.number_input("In-Region (IR)", 0.5, 20.0, 2.10, 0.05)
+    oor_rate = st.number_input("Out-of-Region (OOR)", 0.5, 20.0, 3.85, 0.05)
+
+    st.subheader("Linehaul")
+    rate_per_mile = st.number_input("Linehaul $/mile/trailer", 0.5, 10.0, 2.60, 0.05)
+    stem_rate = st.number_input("Hub→market stem $/mile", 0.5, 10.0, 2.20, 0.05)
+    trailer_cap = st.slider("Trailer capacity (parcels)", 50, 400, 220, 10)
+
+    st.subheader("Hub sort cost ($/parcel)")
+    mem_sort = st.number_input("Memphis sort cost", 0.0, 5.0, 0.35, 0.01)
+    dal_sort = st.number_input("Dallas sort cost", 0.0, 5.0, 0.32, 0.01)
+
+    st.subheader("Hub Filter (include / exclude)")
+    mem_active = st.toggle("Memphis Regional Hub active", value=True)
+    dal_active = st.toggle("Dallas Candidate Hub active", value=True)
+
+    st.subheader("Solver")
+    max_hops = st.slider("Max intermediate hops", 1, 4, 3)
+    iterations = st.slider("Equilibrium iterations", 1, 20, 8)
+
+    run = st.button("Run Baseline & Optimize", type="primary", use_container_width=True)
+
+
+def render(model: HubNetworkModel):
+    baseline_df = model.report(model.baseline_assignment())
+    baseline_tot = model.system_totals(baseline_df)
+
+    optimized_df = model.report(model.optimize_assignment(max_hops, iterations))
+    optimized_tot = model.system_totals(optimized_df)
+
+    cost_delta = round(optimized_tot["total_cost"] - baseline_tot["total_cost"], 2)
+    cpp_delta = round(optimized_tot["network_avg_cpp"] - baseline_tot["network_avg_cpp"], 4)
+    savings_pct = (-cost_delta / baseline_tot["total_cost"] * 100) if baseline_tot["total_cost"] else 0
+
+    # --- KPI row ---
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Baseline total cost", f"${baseline_tot['total_cost']:,.0f}")
+    c2.metric("Optimized total cost", f"${optimized_tot['total_cost']:,.0f}",
+              delta=f"${cost_delta:,.0f}", delta_color="inverse")
+    c3.metric("Network avg CPP", f"${optimized_tot['network_avg_cpp']:.3f}",
+              delta=f"{cpp_delta:+.3f}", delta_color="inverse")
+    c4.metric("Savings vs. baseline", f"{savings_pct:.1f}%")
+
+    # --- comparison table ---
+    st.subheader("Market-level: Baseline vs. Optimized")
+    merged = baseline_df.merge(
+        optimized_df, on=["market_id", "market_name", "delivery_class", "volume"],
+        suffixes=("_base", "_opt"),
     )
+    merged["route_changed"] = merged["route_base"] != merged["route_opt"]
+    merged["cpp_delta"] = (merged["total_cpp_opt"] - merged["total_cpp_base"]).round(4)
+    merged["cost_delta"] = (merged["total_cost_opt"] - merged["total_cost_base"]).round(2)
+    merged = merged.sort_values("cost_delta").reset_index(drop=True)
 
-tab_setup, tab_cost, tab_toggle = st.tabs(["Network Setup", "Cost to Serve", "Hub Toggle"])
+    view = merged[[
+        "market_id", "market_name", "delivery_class", "volume",
+        "route_base", "via_hub_base", "total_cpp_base", "total_cost_base",
+        "route_opt", "via_hub_opt", "total_cpp_opt", "total_cost_opt",
+        "route_changed", "cpp_delta", "cost_delta",
+    ]]
+    st.dataframe(view, use_container_width=True, hide_index=True)
 
-# ---- Tab 1: Network Setup --------------------------------------------------
-with tab_setup:
-    st.subheader("Hubs")
-    st.caption("node_id must be unique. Toggle 'active' to simulate a hub not existing (yet).")
-    st.session_state.hubs_df = st.data_editor(
-        st.session_state.hubs_df, num_rows="dynamic", use_container_width=True, key="hubs_editor",
-        column_config={
-            "sort_cost_per_parcel": st.column_config.NumberColumn(format="$%.2f"),
-            "active": st.column_config.CheckboxColumn(),
-        },
-    )
+    st.caption(f"Markets re-routed by optimizer: **{int(merged['route_changed'].sum())}** "
+               f"of {len(merged)}")
 
-    st.subheader("Lanes")
-    st.caption(
-        "Every transportation link: origin→hub, hub→hub, hub→market, or a direct origin→market bypass. "
-        "Linehaul cost is priced per trailer load and divided by volume actually on the lane, "
-        "so shared/consolidated lanes get cheaper per parcel as volume grows."
-    )
-    st.session_state.lanes_df = st.data_editor(
-        st.session_state.lanes_df, num_rows="dynamic", use_container_width=True, key="lanes_editor",
-        column_config={
-            "rate_per_mile": st.column_config.NumberColumn(format="$%.2f"),
-        },
-    )
-
-    st.subheader("Markets")
-    st.caption(
-        "current_path is a comma-separated node list from origin_node to market_id, "
-        "e.g. FC_ATL,HUB_MEM,MKT_TUL or a direct FC_ATL,MKT_TUL — this is how the market is routed TODAY."
-    )
-    st.session_state.markets_df = st.data_editor(
-        st.session_state.markets_df, num_rows="dynamic", use_container_width=True, key="markets_editor",
-    )
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.subheader("Last-mile base rate table")
-        st.caption("Base $/parcel last-mile cost by delivery classification (input, not the analysis frame).")
-        st.session_state.last_mile_df = st.data_editor(
-            st.session_state.last_mile_df, num_rows="dynamic", use_container_width=True, key="lastmile_editor",
-            column_config={"base_rate": st.column_config.NumberColumn(format="$%.2f")},
-        )
-    with col_b:
-        st.subheader("Hub proximity last-mile multipliers (optional)")
-        st.caption(
-            "Override last_mile_multiplier for a market when a specific hub is the last "
-            "node before it — models a hub being physically closer/farther from a cluster."
-        )
-        st.session_state.multiplier_df = st.data_editor(
-            st.session_state.multiplier_df, num_rows="dynamic", use_container_width=True, key="mult_editor",
-        )
-
-    st.markdown("---")
-    model_preview = build_model_from_state()
-    problems = validate_model(model_preview)
-    if problems:
-        st.error("Fix the following before results will be reliable:\n\n" + "\n".join(f"- {p}" for p in problems))
-    else:
-        st.success("Network configuration is valid.")
-
-
-# ---- shared model build for the other two tabs -----------------------------
-model = build_model_from_state()
-problems = validate_model(model)
-
-
-def cost_burden_chart(df: pd.DataFrame, value_col: str, title: str):
-    chart_df = df.set_index("market_name")[[value_col]]
-    st.bar_chart(chart_df, use_container_width=True)
-
-
-# ---- Tab 2: Cost to Serve ---------------------------------------------------
-with tab_cost:
-    if problems:
-        st.warning("Resolve the issues in Network Setup to see results.")
-    else:
-        current_assignment = {
-            mid: m.current_path for mid, m in model.markets.items() if model.lanes_exist(m.current_path)
-        }
-        missing = set(model.markets) - set(current_assignment)
-        if missing:
-            st.warning(
-                f"These markets' current_path references a lane that doesn't exist in the "
-                f"Lanes table and were excluded from the 'as-routed' report: {sorted(missing)}. "
-                f"(A hub being toggled inactive does NOT exclude a market here -- only a missing lane does.)"
-            )
-
-        st.subheader("Current state — as routed today")
-        if current_assignment:
-            current_df = model.report(current_assignment)
-            totals = model.system_totals(current_df)
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total volume", f"{totals['total_volume']:,}")
-            c2.metric("Total cost to serve", f"${totals['total_cost']:,.2f}")
-            c3.metric("Network avg CPP", f"${totals['network_avg_cpp']:.4f}")
-            st.dataframe(current_df, use_container_width=True, hide_index=True)
-            st.caption("Highest cost-burden markets (by total $ cost-to-serve)")
-            cost_burden_chart(current_df, "total_cost", "Total cost-to-serve by market")
-
-        st.subheader("Optimized routing — best routes given today's active hub set")
-        optimized_assignment = model.optimize_assignment(max_hops=max_hops, iterations=iterations)
-        optimized_df = model.report(optimized_assignment)
-        opt_totals = model.system_totals(optimized_df)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total volume", f"{opt_totals['total_volume']:,}")
-        c2.metric("Total cost to serve", f"${opt_totals['total_cost']:,.2f}")
-        c3.metric("Network avg CPP", f"${opt_totals['network_avg_cpp']:.4f}")
+    # --- detail tabs ---
+    tab1, tab2 = st.tabs(["Baseline detail", "Optimized detail"])
+    with tab1:
+        st.dataframe(baseline_df, use_container_width=True, hide_index=True)
+    with tab2:
         st.dataframe(optimized_df, use_container_width=True, hide_index=True)
-        cost_burden_chart(optimized_df, "total_cpp", "CPP by market (optimized)")
+
+    # --- downloads ---
+    st.download_button("Download comparison (CSV)",
+                       view.to_csv(index=False).encode(),
+                       "baseline_vs_optimized.csv", "text/csv")
 
 
-# ---- Tab 3: Hub Toggle ------------------------------------------------------
-with tab_toggle:
-    if problems:
-        st.warning("Resolve the issues in Network Setup to run a toggle scenario.")
-    elif not model.hubs:
-        st.info("Add at least one hub in Network Setup to use this tab.")
-    else:
-        hub_ids = list(model.hubs.keys())
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            selected_hub = st.selectbox(
-                "Hub to toggle",
-                hub_ids,
-                format_func=lambda h: f"{h} — {model.hubs[h].name} (currently {'ACTIVE' if model.hubs[h].active else 'inactive'})",
-            )
-        current_hub_active = model.hubs[selected_hub].active
-        # Default the proposed new state to the FLIP of what's actually
-        # configured for this hub right now, so the control behaves like a
-        # real toggle instead of always resetting to "Active". Keying by
-        # hub id also means switching hubs doesn't carry over a stale pick
-        # from a previously selected hub.
-        default_index = 0 if not current_hub_active else 1  # 0="Active", 1="Inactive"
-        with col2:
-            new_state = st.radio(
-                "New state", ["Active", "Inactive"], horizontal=True,
-                index=default_index, key=f"toggle_state_{selected_hub}",
-            )
-        new_active = new_state == "Active"
-
-        st.caption(
-            f"**{selected_hub}** is currently **{'ACTIVE' if current_hub_active else 'INACTIVE'}** "
-            f"in Network Setup. **Baseline** = the current state exactly as entered there (each "
-            f"market's current_path), regardless of any hub's active flag. **Scenario** = routing "
-            f"re-optimized after {selected_hub} is set to **{new_state.upper()}** below. Any lane "
-            f"rate, sort cost, or last-mile rate you've edited in Network Setup feeds both automatically."
-        )
-
-        if st.button("Run toggle scenario", type="primary"):
-            result = model.toggle_hub(selected_hub, active=new_active, max_hops=max_hops, iterations=iterations)
-            sd = result["system_delta"]
-
-            excluded_from_baseline = sd.get("markets_excluded_from_baseline", [])
-            if excluded_from_baseline:
-                st.warning(
-                    f"These markets' current_path references a lane that doesn't exist and were "
-                    f"excluded from the baseline (their full scenario cost shows as the delta): "
-                    f"{excluded_from_baseline}"
-                )
-
-            st.subheader(f"System-level impact of setting {selected_hub} to {new_state.upper()}")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Baseline cost (current state)", f"${sd['total_cost_baseline']:,.2f}")
-            c2.metric(
-                "Scenario cost (optimized)",
-                f"${sd['total_cost_scenario']:,.2f}",
-                delta=f"${sd['total_cost_delta']:,.2f}",
-                delta_color="inverse",
-            )
-            c3.metric(
-                "Network avg CPP (optimized)",
-                f"${sd['network_avg_cpp_scenario']:.4f}",
-                delta=f"${sd['network_avg_cpp_scenario'] - sd['network_avg_cpp_baseline']:.4f}",
-                delta_color="inverse",
-            )
-            c4.metric("Markets re-routed", sd["markets_rerouted"])
-
-            st.subheader("Market-level delta")
-            delta_df = result["market_delta"][[
-                "market_id", "market_name", "volume", "route_baseline", "route_scenario",
-                "route_changed", "cpp_delta", "cost_delta",
-            ]]
-
-            # Manual red/green shading on cost_delta without a matplotlib
-            # dependency (pandas Styler.background_gradient requires
-            # matplotlib, which may not be installed on the deploy target).
-            max_abs = max(abs(delta_df["cost_delta"].min()), abs(delta_df["cost_delta"].max()), 1e-9)
-
-            def _shade_cost_delta(val):
-                intensity = min(abs(val) / max_abs, 1.0)
-                if val < 0:
-                    # cheaper under the new state -> green
-                    color = f"rgba(34, 139, 34, {0.15 + 0.55 * intensity:.2f})"
-                elif val > 0:
-                    # more expensive under the new state -> red
-                    color = f"rgba(178, 34, 34, {0.15 + 0.55 * intensity:.2f})"
-                else:
-                    color = "transparent"
-                return f"background-color: {color}"
-
-            styler = delta_df.style
-            try:
-                styled = styler.map(_shade_cost_delta, subset=["cost_delta"])
-            except AttributeError:
-                # older pandas (<2.1) doesn't have Styler.map yet
-                styled = styler.applymap(_shade_cost_delta, subset=["cost_delta"])
-            st.dataframe(styled, use_container_width=True, hide_index=True)
-
-            st.caption("Cost delta by market (negative = cheaper under the new hub state)")
-            chart_df = delta_df.set_index("market_name")[["cost_delta"]]
-            st.bar_chart(chart_df, use_container_width=True)
-
-            with st.expander("Full baseline report"):
-                st.dataframe(result["baseline_report"], use_container_width=True, hide_index=True)
-            with st.expander("Full scenario report"):
-                st.dataframe(result["scenario_report"], use_container_width=True, hide_index=True)
+if run:
+    model = build_network(ir_rate, oor_rate, mem_sort, dal_sort,
+                          mem_active, dal_active, rate_per_mile, stem_rate, trailer_cap)
+    render(model)
+else:
+    st.info("Set parameters and hub filters in the sidebar, then click "
+            "**Run Baseline & Optimize**.")
