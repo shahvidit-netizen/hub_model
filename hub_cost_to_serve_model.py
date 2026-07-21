@@ -407,7 +407,7 @@ def build_demo_network() -> HubNetworkModel:
     model = HubNetworkModel(last_mile_rate_table={"IR": 2.10, "OOR": 3.85})
 
     # Hubs: one existing regional hub, one candidate hub (start inactive)
-    model.add_hub(Hub("HUB_MEM", "Memphis Regional Hub", sort_cost_per_parcel=0.35, active=True))
+    model.add_hub(Hub("HUB_MEM", "Memphis Regional Hub", sort_cost_per_parcel=0.35, active=False))
     model.add_hub(Hub("HUB_DAL", "Dallas Candidate Hub", sort_cost_per_parcel=0.32, active=False))
 
     # Lanes: origin -> hub, hub -> hub, hub -> market, origin -> market (direct/bypass)
@@ -438,7 +438,7 @@ def build_demo_network() -> HubNetworkModel:
     ))
     model.add_market(Market(
         "MKT_TUL", "Tulsa Cluster", origin_node="FC_ATL", volume=1150, delivery_class="OOR",
-        current_path=["FC_ATL", "HUB_MEM", "MKT_TUL"],
+        current_path=["FC_ATL", "MKT_TUL"],   # currently routed direct, bypassing any hub
         last_mile_multiplier=1.10,
         last_mile_multiplier_by_hub={"HUB_DAL": 0.95, "HUB_MEM": 1.02},
     ))
@@ -450,7 +450,7 @@ def build_demo_network() -> HubNetworkModel:
     ))
     model.add_market(Market(
         "MKT_LIT", "Little Rock Cluster", origin_node="FC_ATL", volume=1900, delivery_class="IR",
-        current_path=["FC_ATL", "HUB_MEM", "MKT_LIT"],
+        current_path=["FC_ATL", "MKT_LIT"],
         last_mile_multiplier=0.95,
         last_mile_multiplier_by_hub={"HUB_MEM": 0.90, "HUB_DAL": 1.05},
     ))
@@ -489,12 +489,12 @@ if __name__ == "__main__":
     print(current_df.nlargest(3, "total_cost")[["market_id", "market_name", "total_cpp", "total_cost"]]
           .to_string(index=False))
 
-    # ---- 2. Best achievable routing under TODAY's active hub set ----------
+    # ---- 2. Best achievable routing under TODAY's active hub set (none) ---
     optimized_assignment = model.optimize_assignment()
     optimized_df = model.report(optimized_assignment)
     optimized_totals = model.system_totals(optimized_df)
-    pretty_print("OPTIMIZED ROUTING -- best routes with only HUB_MEM active", optimized_df)
-    print(f"\nSystem totals (optimized, HUB_MEM only): {optimized_totals}")
+    pretty_print("OPTIMIZED ROUTING -- best routes with no hubs active (direct only)", optimized_df)
+    print(f"\nSystem totals (optimized, no hubs active): {optimized_totals}")
 
     # ---- 3. Bonus: toggle the candidate hub (HUB_DAL) ON and see the delta ----
     result = model.toggle_hub("HUB_DAL", active=True)
