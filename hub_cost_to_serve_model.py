@@ -345,12 +345,37 @@ class HubNetworkModel:
 
     # ---- the bonus feature: toggle a hub and see the system delta ---------
 
+    def current_state_report(self) -> Tuple[pd.DataFrame, Dict[str, float], List[str]]:
+        """The literal 'as-entered today' picture: cost each market's own
+        current_path exactly as configured, independent of any hub's
+        active/inactive flag (only requires the lanes on that path to
+        actually exist). This is the true baseline -- e.g. 'both hubs
+        inactive, everything direct' -- not an already-optimized state.
+        Returns (report_df, totals, market_ids_excluded_for_missing_lanes).
+        """
+        assignment = {
+            mid: m.current_path for mid, m in self.markets.items() if self.lanes_exist(m.current_path)
+        }
+        excluded = sorted(set(self.markets) - set(assignment))
+        df = self.report(assignment)
+        totals = self.system_totals(df)
+        return df, totals, excluded
+
     def toggle_hub(self, hub_id: str, active: bool, max_hops: int = 3, iterations: int = 8):
-        """Flip a hub active/inactive, re-optimize routing, and return:
-          - baseline report/totals (hub in its ORIGINAL state)
-          - scenario report/totals (hub in the NEW state)
-          - a market-level delta table
+        """Flip a hub active/inactive and return:
+          - baseline report/totals -- the literal current state (current_path
+            for every market, as configured today; unaffected by the toggle)
+          - scenario report/totals -- routing RE-OPTIMIZED with the hub in
+            its NEW (toggled) state, so turning a hub on immediately shows
+            the best routing that becomes available, not just a recheck of
+            existing paths
+          - a market-level delta table (route + cost, baseline vs scenario)
           - the system-level cost delta
+        Any lane-rate, sort-cost, or last-mile-rate edits already present on
+        this model (e.g. from the Network Setup tables) feed BOTH the
+        baseline and the scenario automatically, since both are computed
+        fresh from the model's current lanes/hubs/rate table -- there's no
+        cached/stale costing anywhere in this path.
         Restores the hub's original state before returning so repeated
         toggles are independent (no side effects across calls).
         """
@@ -359,12 +384,12 @@ class HubNetworkModel:
 
         original_state = self.hubs[hub_id].active
 
-        # baseline: current state, optimized routing
-        baseline_assignment = self.optimize_assignment(max_hops, iterations)
-        baseline_df = self.report(baseline_assignment)
-        baseline_totals = self.system_totals(baseline_df)
+        # baseline: literal current state, exactly as configured today
+        baseline_df, baseline_totals, excluded = self.current_state_report()
 
-        # scenario: toggled state, optimized routing
+        # scenario: hub flipped to its new state, THEN re-optimize routing
+        # so the scenario reflects the best use of the newly available (or
+        # newly removed) hub -- not just re-costing the old paths.
         self.hubs[hub_id].active = active
         scenario_assignment = self.optimize_assignment(max_hops, iterations)
         scenario_df = self.report(scenario_assignment)
@@ -375,9 +400,9 @@ class HubNetworkModel:
 
         merged = baseline_df.merge(
             scenario_df, on=["market_id", "market_name", "delivery_class", "volume"],
-            suffixes=("_baseline", "_scenario")
+            suffixes=("_baseline", "_scenario"), how="outer"
         )
-        merged["route_changed"] = merged["route_baseline"] != merged["route_scenario"]
+        merged["route_changed"] = merged["route_baseline"].notna() & (merged["route_baseline"] != merged["route_scenario"])
         merged["cpp_delta"] = (merged["total_cpp_scenario"] - merged["total_cpp_baseline"]).round(4)
         merged["cost_delta"] = (merged["total_cost_scenario"] - merged["total_cost_baseline"]).round(2)
         merged = merged.sort_values("cost_delta").reset_index(drop=True)
@@ -389,7 +414,9 @@ class HubNetworkModel:
             "network_avg_cpp_baseline": baseline_totals["network_avg_cpp"],
             "network_avg_cpp_scenario": scenario_totals["network_avg_cpp"],
             "markets_rerouted": int(merged["route_changed"].sum()),
+            "markets_excluded_from_baseline": excluded,
         }
+
 
         return {
             "baseline_report": baseline_df,
@@ -479,11 +506,11 @@ if __name__ == "__main__":
     model = build_demo_network()
 
     # ---- 1. Current state, priced as-is (no re-optimization) --------------
-    current_assignment = {mid: m.current_path for mid, m in model.markets.items()}
-    current_df = model.report(current_assignment)
-    current_totals = model.system_totals(current_df)
+    current_df, current_totals, excluded = model.current_state_report()
     pretty_print("CURRENT STATE -- end-to-end CPP by market (as currently routed)", current_df)
     print(f"\nSystem totals (current routing): {current_totals}")
+    if excluded:
+        print(f"NOTE: excluded from current-state report (invalid current_path): {excluded}")
 
     print("\nHighest end-to-end cost burden markets (by total $ cost-to-serve):")
     print(current_df.nlargest(3, "total_cost")[["market_id", "market_name", "total_cpp", "total_cost"]]
@@ -499,7 +526,7 @@ if __name__ == "__main__":
     # ---- 3. Bonus: toggle the candidate hub (HUB_DAL) ON and see the delta ----
     result = model.toggle_hub("HUB_DAL", active=True)
     pretty_print("SCENARIO -- HUB_DAL activated (optimized routing)", result["scenario_report"])
-    pretty_print("MARKET-LEVEL DELTA -- HUB_DAL toggled ON vs current active-hub baseline", result["market_delta"][
+    pretty_print("MARKET-LEVEL DELTA -- HUB_DAL toggled ON vs current state baseline", result["market_delta"][
         ["market_id", "market_name", "route_baseline", "route_scenario", "route_changed",
          "cpp_delta", "cost_delta"]
     ])
