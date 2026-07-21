@@ -293,10 +293,15 @@ class HubNetworkModel:
     # ---- reporting ----------------------------------------------------------
 
     def report(self, assignment: Dict[str, List[str]]) -> pd.DataFrame:
+        """Build a cost-to-serve report for whichever markets are present in
+        `assignment`. `assignment` may be a partial mapping (e.g. only
+        markets whose current_path is still valid under today's active hub
+        set) -- markets missing from it are simply left out of the report
+        rather than raising a KeyError."""
         lane_volumes = self._lane_volumes(assignment)
         rows = []
-        for mid, market in self.markets.items():
-            path = assignment[mid]
+        for mid, path in assignment.items():
+            market = self.markets[mid]
             breakdown = self.route_cost_breakdown(market, path, lane_volumes)
             rows.append({
                 "market_id": mid,
@@ -310,10 +315,14 @@ class HubNetworkModel:
                 "total_cpp": breakdown["total_cpp"],
                 "total_cost": round(breakdown["total_cpp"] * market.volume, 2),
             })
-        df = pd.DataFrame(rows).sort_values("total_cost", ascending=False).reset_index(drop=True)
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df = df.sort_values("total_cost", ascending=False).reset_index(drop=True)
         return df
 
     def system_totals(self, df: pd.DataFrame) -> Dict[str, float]:
+        if df.empty:
+            return {"total_volume": 0, "total_cost": 0.0, "network_avg_cpp": 0.0}
         total_volume = df["volume"].sum()
         total_cost = df["total_cost"].sum()
         return {
