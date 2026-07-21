@@ -350,26 +350,38 @@ with tab_toggle:
                 hub_ids,
                 format_func=lambda h: f"{h} — {model.hubs[h].name} (currently {'ACTIVE' if model.hubs[h].active else 'inactive'})",
             )
+        current_hub_active = model.hubs[selected_hub].active
+        # Default the proposed new state to the FLIP of what's actually
+        # configured for this hub right now, so the control behaves like a
+        # real toggle instead of always resetting to "Active". Keying by
+        # hub id also means switching hubs doesn't carry over a stale pick
+        # from a previously selected hub.
+        default_index = 0 if not current_hub_active else 1  # 0="Active", 1="Inactive"
         with col2:
-            new_state = st.radio("New state", ["Active", "Inactive"], horizontal=True)
+            new_state = st.radio(
+                "New state", ["Active", "Inactive"], horizontal=True,
+                index=default_index, key=f"toggle_state_{selected_hub}",
+            )
         new_active = new_state == "Active"
 
         st.caption(
-            "**Baseline** = the current state exactly as entered in Network Setup (each market's "
-            "current_path), regardless of any hub's active flag. **Scenario** = routing "
-            "re-optimized after the hub is set to its new state below. Any lane rate, sort "
-            "cost, or last-mile rate you've edited in Network Setup feeds both automatically."
+            f"**{selected_hub}** is currently **{'ACTIVE' if current_hub_active else 'INACTIVE'}** "
+            f"in Network Setup. **Baseline** = the current state exactly as entered there (each "
+            f"market's current_path), regardless of any hub's active flag. **Scenario** = routing "
+            f"re-optimized after {selected_hub} is set to **{new_state.upper()}** below. Any lane "
+            f"rate, sort cost, or last-mile rate you've edited in Network Setup feeds both automatically."
         )
 
         if st.button("Run toggle scenario", type="primary"):
             result = model.toggle_hub(selected_hub, active=new_active, max_hops=max_hops, iterations=iterations)
             sd = result["system_delta"]
 
-            if sd["markets_excluded_from_baseline"]:
+            excluded_from_baseline = sd.get("markets_excluded_from_baseline", [])
+            if excluded_from_baseline:
                 st.warning(
                     f"These markets' current_path references a lane that doesn't exist and were "
                     f"excluded from the baseline (their full scenario cost shows as the delta): "
-                    f"{sd['markets_excluded_from_baseline']}"
+                    f"{excluded_from_baseline}"
                 )
 
             st.subheader(f"System-level impact of setting {selected_hub} to {new_state.upper()}")
