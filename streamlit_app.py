@@ -378,10 +378,31 @@ with tab_toggle:
                 "market_id", "market_name", "volume", "route_baseline", "route_scenario",
                 "route_changed", "cpp_delta", "cost_delta",
             ]]
-            st.dataframe(
-                delta_df.style.background_gradient(subset=["cost_delta"], cmap="RdYlGn_r"),
-                use_container_width=True, hide_index=True,
-            )
+
+            # Manual red/green shading on cost_delta without a matplotlib
+            # dependency (pandas Styler.background_gradient requires
+            # matplotlib, which may not be installed on the deploy target).
+            max_abs = max(abs(delta_df["cost_delta"].min()), abs(delta_df["cost_delta"].max()), 1e-9)
+
+            def _shade_cost_delta(val):
+                intensity = min(abs(val) / max_abs, 1.0)
+                if val < 0:
+                    # cheaper under the new state -> green
+                    color = f"rgba(34, 139, 34, {0.15 + 0.55 * intensity:.2f})"
+                elif val > 0:
+                    # more expensive under the new state -> red
+                    color = f"rgba(178, 34, 34, {0.15 + 0.55 * intensity:.2f})"
+                else:
+                    color = "transparent"
+                return f"background-color: {color}"
+
+            styler = delta_df.style
+            try:
+                styled = styler.map(_shade_cost_delta, subset=["cost_delta"])
+            except AttributeError:
+                # older pandas (<2.1) doesn't have Styler.map yet
+                styled = styler.applymap(_shade_cost_delta, subset=["cost_delta"])
+            st.dataframe(styled, use_container_width=True, hide_index=True)
 
             st.caption("Cost delta by market (negative = cheaper under the new hub state)")
             chart_df = delta_df.set_index("market_name")[["cost_delta"]]
