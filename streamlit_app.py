@@ -354,25 +354,40 @@ with tab_toggle:
             new_state = st.radio("New state", ["Active", "Inactive"], horizontal=True)
         new_active = new_state == "Active"
 
+        st.caption(
+            "**Baseline** = the current state exactly as entered in Network Setup (each market's "
+            "current_path), regardless of any hub's active flag. **Scenario** = routing "
+            "re-optimized after the hub is set to its new state below. Any lane rate, sort "
+            "cost, or last-mile rate you've edited in Network Setup feeds both automatically."
+        )
+
         if st.button("Run toggle scenario", type="primary"):
             result = model.toggle_hub(selected_hub, active=new_active, max_hops=max_hops, iterations=iterations)
             sd = result["system_delta"]
 
+            if sd["markets_excluded_from_baseline"]:
+                st.warning(
+                    f"These markets' current_path references a lane that doesn't exist and were "
+                    f"excluded from the baseline (their full scenario cost shows as the delta): "
+                    f"{sd['markets_excluded_from_baseline']}"
+                )
+
             st.subheader(f"System-level impact of setting {selected_hub} to {new_state.upper()}")
-            c1, c2, c3 = st.columns(3)
-            c1.metric(
-                "Total cost to serve",
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Baseline cost (current state)", f"${sd['total_cost_baseline']:,.2f}")
+            c2.metric(
+                "Scenario cost (optimized)",
                 f"${sd['total_cost_scenario']:,.2f}",
                 delta=f"${sd['total_cost_delta']:,.2f}",
                 delta_color="inverse",
             )
-            c2.metric(
-                "Network avg CPP",
+            c3.metric(
+                "Network avg CPP (optimized)",
                 f"${sd['network_avg_cpp_scenario']:.4f}",
                 delta=f"${sd['network_avg_cpp_scenario'] - sd['network_avg_cpp_baseline']:.4f}",
                 delta_color="inverse",
             )
-            c3.metric("Markets re-routed", sd["markets_rerouted"])
+            c4.metric("Markets re-routed", sd["markets_rerouted"])
 
             st.subheader("Market-level delta")
             delta_df = result["market_delta"][[
