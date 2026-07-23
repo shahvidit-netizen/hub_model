@@ -134,27 +134,30 @@ class HubNetworkModel:
         dfs(origin, [origin])
         return routes
 
-    def route_cost_breakdown(
-        self, market: Market, path: List[str], lane_volumes: Dict[Tuple[str, str], int]
-    ) -> Dict[str, float]:
-        linehaul_cpp = 0.0
-        for a, b in zip(path, path[1:]):
-            lane = self.lanes[(a, b)]
-            vol = lane_volumes.get((a, b), market.volume)
-            linehaul_cpp += lane.linehaul_cpp(vol)
+def route_cost_breakdown(self, market, path, lane_volumes):
+    fc_to_hub_cpp = 0.0
+    hub_to_market_cpp = 0.0
+    for a, b in zip(path, path[1:]):
+        lane = self.lanes[(a, b)]
+        vol = lane_volumes.get((a, b), market.volume)
+        cpp = lane.linehaul_cpp(vol)
+        # leg is hub -> market if origin is a hub and dest is the market node
+        if a in self.hubs and b == market.market_id:
+            hub_to_market_cpp += cpp
+        else:
+            fc_to_hub_cpp += cpp   # FC->hub, FC->market direct, hub->hub
 
-        sort_cpp = sum(
-            self.hubs[node].sort_cost_per_parcel
-            for node in path[1:-1] if node in self.hubs
-        )
-        last_mile = self.last_mile_cpp(market, self._serving_hub(path))
-        total = linehaul_cpp + sort_cpp + last_mile
-        return {
-            "linehaul_cpp": round(linehaul_cpp, 4),
-            "sort_cpp": round(sort_cpp, 4),
-            "last_mile_cpp": round(last_mile, 4),
-            "total_cpp": round(total, 4),
-        }
+    sort_cpp = sum(self.hubs[n].sort_cost_per_parcel
+                   for n in path[1:-1] if n in self.hubs)
+    last_mile = self.last_mile_cpp(market, self._serving_hub(path))
+    total = fc_to_hub_cpp + hub_to_market_cpp + sort_cpp + last_mile
+    return {
+        "fc_to_hub_cpp": round(fc_to_hub_cpp, 4),
+        "hub_to_market_cpp": round(hub_to_market_cpp, 4),
+        "sort_cpp": round(sort_cpp, 4),
+        "last_mile_cpp": round(last_mile, 4),
+        "total_cpp": round(total, 4),
+    }
 
     def _lane_volumes(self, assignment: Dict[str, List[str]]) -> Dict[Tuple[str, str], int]:
         volumes: Dict[Tuple[str, str], int] = {}
