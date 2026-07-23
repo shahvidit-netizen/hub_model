@@ -296,12 +296,12 @@ def build_network(ir_rate, oor_rate, mem_sort, dal_sort,
             model.add_lane(Lane(hub, m, dist, stem_rate, max(1, int(trailer_cap * 0.82))))
 
     markets = [
-        ("MKT_SHV", "Shreveport Cluster", 1400, "OOR", 1.05, {"HUB_DAL": 0.90, "HUB_MEM": 0.98}),
-        ("MKT_TUL", "Tulsa Cluster", 1150, "OOR", 1.10, {"HUB_DAL": 0.95, "HUB_MEM": 1.02}),
-        ("MKT_OKC", "Oklahoma City Cluster", 2200, "IR", 1.00, {"HUB_DAL": 0.92, "HUB_MEM": 1.00}),
-        ("MKT_LIT", "Little Rock Cluster", 1900, "IR", 0.95, {"HUB_MEM": 0.90, "HUB_DAL": 1.05}),
-        ("MKT_FTW", "Fort Worth Cluster", 2600, "IR", 1.00, {"HUB_DAL": 0.80, "HUB_MEM": 1.05}),
-        ("MKT_ABI", "Abilene Cluster", 800, "OOR", 1.15, {"HUB_DAL": 0.88, "HUB_MEM": 1.10}),
+        ("MKT_SHV", "Shreveport Cluster", 1400, "OOR", 1, {"HUB_DAL": 1, "HUB_MEM": 1}),
+        ("MKT_TUL", "Tulsa Cluster", 1150, "OOR", 1, {"HUB_DAL": 1, "HUB_MEM": 1}),
+        ("MKT_OKC", "Oklahoma City Cluster", 2200, "IR", 1.00, {"HUB_DAL": 1, "HUB_MEM": 1.00}),
+        ("MKT_LIT", "Little Rock Cluster", 1900, "IR", 1, {"HUB_MEM": 1, "HUB_DAL": 1}),
+        ("MKT_FTW", "Fort Worth Cluster", 2600, "IR", 1.00, {"HUB_DAL": 1, "HUB_MEM": 1}),
+        ("MKT_ABI", "Abilene Cluster", 800, "OOR", 1, {"HUB_DAL": 1, "HUB_MEM": 1}),
     ]
     for mid, name, vol, cls, mult, by_hub in markets:
         model.add_market(Market(mid, name, "FC_ATL", vol, cls, mult, by_hub))
